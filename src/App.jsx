@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   CheckCircle2,
   Circle,
@@ -9,6 +9,8 @@ import {
   X,
   Calendar,
 } from 'lucide-react';
+import { isLoggedIn, logout, fetchRemoteData, pushRemoteData } from './pb';
+import LoginScreen from './LoginScreen';
 
 // ============================================================
 // DATA: goal *definitions* (title, type, target, subtasks, ...)
@@ -843,9 +845,71 @@ export default function App() {
     localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history));
   }, [history]);
 
+  const [loggedIn, setLoggedIn] = useState(isLoggedIn());
+  // 'idle' | 'syncing' | 'synced' | 'offline'
+  const [syncStatus, setSyncStatus] = useState('idle');
+  // Guards the push effect below from firing (and clobbering the server)
+  // before the initial pull/seed on login has resolved.
+  const hasHydrated = useRef(false);
+
+  // Pull on login: remote data (if any) replaces local state; if the user
+  // has no record yet, current localStorage contents become the seed.
+  useEffect(() => {
+    if (!loggedIn) return;
+    let cancelled = false;
+    (async () => {
+      setSyncStatus('syncing');
+      try {
+        const remote = await fetchRemoteData();
+        if (cancelled) return;
+        if (remote) {
+          setGoals(remote.goals && remote.goals.length ? remote.goals : DEFAULT_GOALS);
+          setHistory(remote.history || {});
+        } else {
+          await pushRemoteData(goals, history);
+        }
+        if (!cancelled) setSyncStatus('synced');
+      } catch {
+        if (!cancelled) setSyncStatus('offline');
+      } finally {
+        hasHydrated.current = true;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loggedIn]);
+
+  // Push on change, debounced so rapid +/- taps don't spam the network.
+  useEffect(() => {
+    if (!loggedIn || !hasHydrated.current) return;
+    setSyncStatus('syncing');
+    const timeout = setTimeout(async () => {
+      try {
+        await pushRemoteData(goals, history);
+        setSyncStatus('synced');
+      } catch {
+        setSyncStatus('offline');
+      }
+    }, 800);
+    return () => clearTimeout(timeout);
+  }, [goals, history, loggedIn]);
+
+  const handleLogout = () => {
+    logout();
+    hasHydrated.current = false;
+    setSyncStatus('idle');
+    setLoggedIn(false);
+  };
+
   const [activeTab, setActiveTab] = useState('today');
   // null = closed, 'new' = add form, otherwise the id of the goal being edited.
   const [formMode, setFormMode] = useState(null);
+
+  if (!loggedIn) {
+    return <LoginScreen onLoggedIn={() => setLoggedIn(true)} />;
+  }
 
   const today = todayKey();
   const todayEntry = history[today] || {};
@@ -962,7 +1026,14 @@ export default function App() {
       }}
     >
       <div style={{ width: '100%', maxWidth: 420 }}>
-        <div style={{ marginBottom: 20 }}>
+        <div
+          style={{
+            marginBottom: 20,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}
+        >
           <p style={{ color: '#8E8E93', fontSize: 14, margin: 0 }}>
             {new Date().toLocaleDateString('en-US', {
               weekday: 'long',
@@ -970,6 +1041,27 @@ export default function App() {
               day: 'numeric',
             })}
           </p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ color: '#636366', fontSize: 12 }}>
+              {syncStatus === 'syncing' && 'Syncing…'}
+              {syncStatus === 'synced' && 'Synced'}
+              {syncStatus === 'offline' && 'Offline'}
+            </span>
+            <button
+              onClick={handleLogout}
+              style={{
+                background: 'none',
+                border: 'none',
+                padding: 0,
+                color: '#636366',
+                fontSize: 12,
+                cursor: 'pointer',
+                textDecoration: 'underline',
+              }}
+            >
+              Log out
+            </button>
+          </div>
         </div>
 
         <TabBar
